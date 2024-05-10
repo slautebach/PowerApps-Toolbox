@@ -1,0 +1,167 @@
+# Yaml Toolset Documentation
+# https://learn.microsoft.com/en-us/power-platform/alm/devops-build-tool-tasks
+
+
+steps:
+
+##########################################################################
+# Log the Environment Variables, useful for debugging pipelines
+##########################################################################
+- pwsh: 'Get-ChildItem env:'
+  displayName: 'Log Environment Variables'
+
+#########################################################################
+#  Build Plugins
+#   - If BuildPlugins = true
+#########################################################################
+
+# Install Nuget Tool Installer
+- task: NuGetToolInstaller@0
+  displayName: 'Use NuGet 5.6'
+  condition: eq(variables.BuildPlugins, true)
+  inputs:
+    versionSpec: 5.6
+
+# Restore all Nuget Packages
+- task: NuGetCommand@2
+  displayName: 'NuGet restore'
+  condition: eq(variables.BuildPlugins, true)
+  inputs:
+    # find all soltions recursively under all folders
+    restoreSolution: '$(Build.SourcesDirectory)\**\*.sln'
+
+
+##########################################################################
+# Rename Function Apps
+##########################################################################
+- task: VSBuild@1
+  displayName: 'Build Function Apps'
+  condition: eq(variables.BuildFunctionApps, true)
+  inputs:
+    # find all soltions recursively under the $(SolutionName) Plugins Folder
+    solution: '$(Build.SourcesDirectory)\$(SolutionName)\FunctionApps\**\*.sln'
+    configuration: 'release'
+
+
+# Build all plugins
+- task: VSBuild@1
+  displayName: 'Build Plugin Solutions'
+  condition: eq(variables.BuildPlugins, true)
+  inputs:
+    # find all soltions recursively under the $(SolutionName) Plugins Folder
+    solution: '$(Build.SourcesDirectory)\$(SolutionName)\Plugins\**\*.sln'
+    configuration: 'release'
+
+##########################################################################
+# Rename Solution DLL's that have a "." in their name
+##########################################################################
+- pwsh: |
+   Get-ChildItem -Path '$(Build.SourcesDirectory)\$(SolutionName)\Plugins\' -Recurse -Include *.dll | Where-Object {
+      $_.FullName.Contains("\bin\Release\") -and !$_.Name.StartsWith("System.") -and !$_.Name.StartsWith("Microsoft.") -and $_.BaseName.Contains(".")
+    } 
+    | ForEach-Object {
+      $strippedBaseName = $_.BaseName.Replace(".", "")
+      $targetFileName = "$($_.DirectoryName)\$strippedBaseName$($_.Extension)"
+      Write-Host "Copying $($_.FullName) to: $targetFileName"
+      Copy-Item -Path $_.FullName -Destination $targetFileName
+    }
+  displayName: 'Rename Compiled Plugins for mapping.xml'
+  condition: eq(variables.BuildPlugins, true)
+
+
+##########################################################################
+# Log list of compiled assemblies
+##########################################################################
+- pwsh: |
+   Get-ChildItem -Path '$(Build.SourcesDirectory)\$(SolutionName)\Plugins\' -Recurse -Include *.dll,*.nupkg | Where-Object {!$_.FullName.Contains("\packages\") } 
+    | ForEach-Object {
+      Write-Host $_.FullName
+    }
+  displayName: 'Log List of Compiled Plugins dll'
+  condition: eq(variables.BuildPlugins, true)
+
+
+  
+# Build CFMWS Common plugins
+- task: VSBuild@1
+  displayName: 'Build Common Plugins Solutions'
+  condition: eq(variables.BuildCommonPlugins, true)
+  inputs:
+    # find all soltions recursively under the $(SolutionName) Plugins Folder
+    solution: '$(Build.SourcesDirectory)\CFMWSCommonElements\Plugins\**\*.sln'
+    configuration: 'release'
+
+##########################################################################
+# Rename Solution DLL's that have a "." in their name so the mapping file can pick them up
+##########################################################################
+- pwsh: |
+   Get-ChildItem -Path '$(Build.SourcesDirectory)\CFMWSCommonElements\Plugins\' -Recurse -Include *.dll | Where-Object {
+      $_.FullName.Contains("\bin\Release\") -and !$_.Name.StartsWith("System.") -and !$_.Name.StartsWith("Microsoft.") -and $_.BaseName.Contains(".")
+    } 
+    | ForEach-Object {
+      $strippedBaseName = $_.BaseName.Replace(".", "")
+      $targetFileName = "$($_.DirectoryName)\$strippedBaseName$($_.Extension)"
+      Write-Host "Copying $($_.FullName) to: $targetFileName"
+      Copy-Item -Path $_.FullName -Destination $targetFileName
+    }
+  displayName: 'Rename Compiled Plugins for mapping.xml'
+  condition: eq(variables.BuildCommonPlugins, true)
+
+
+
+
+#########################################################################
+#  Package Dataverse Solution
+#########################################################################
+
+# Install the Power Platform Tools
+- task: microsoft-IsvExpTools.PowerPlatform-BuildTools.tool-installer.PowerPlatformToolInstaller@2
+  displayName: 'Power Platform Tool Installer '
+
+# Package the unmanaged solution from source
+- task: microsoft-IsvExpTools.PowerPlatform-BuildTools.pack-solution.PowerPlatformPackSolution@2
+  displayName: 'Package Unmanaged $(SolutionName).zip'
+  inputs:
+    SolutionSourceFolder: '$(Build.SourcesDirectory)\$(SolutionName)\Solution-Unmanaged'
+    SolutionOutputFile: '$(Build.ArtifactStagingDirectory)\$(SolutionName)_unmanaged.zip'
+    SolutionType: 'Unmanaged'
+    MapFile: '$(SolutionMappingFile)'
+
+# Package the managed solution from source
+- task: microsoft-IsvExpTools.PowerPlatform-BuildTools.pack-solution.PowerPlatformPackSolution@2
+  displayName:  'Package Managed $(SolutionName)_managed.zip'
+  inputs:
+    SolutionSourceFolder: '$(Build.SourcesDirectory)\$(SolutionName)\Solution-Managed'
+    SolutionOutputFile: '$(Build.ArtifactStagingDirectory)\$(SolutionName)_managed.zip'
+    SolutionType: 'Managed'
+    MapFile: '$(SolutionMappingFile)'
+
+- task: PowerShell@2
+  displayName:  'Copy Deployment Dependency files to: $(Build.ArtifactStagingDirectory)'
+  inputs:
+    filePath: '$(Build.SourcesDirectory)\DevOps\Copy-ArtifactFiles.ps1'
+    arguments: '-DestinationPath "$(Build.ArtifactStagingDirectory)" -ProjectVariableFile "$(ProjectVariableFile)" -SolutionName "$(SolutionName)"'
+
+
+#########################################################################
+#  Package Configuration Data 
+#    - if IncludeData = true
+#########################################################################
+
+- pwsh: Compress-Archive  -DestinationPath $(Build.ArtifactStagingDirectory)\$(SolutionName).data.zip -LiteralPath "$(Build.SourcesDirectory)\$(SolutionName)\Data\Configuration\[Content_Types].xml","$(Build.SourcesDirectory)\$(SolutionName)\Data\Configuration\data.xml","$(Build.SourcesDirectory)\$(SolutionName)\Data\Configuration\data_schema.xml"
+  displayName: 'Zip Data for $(SolutionName)'
+  # Include the data if it is enabled
+  condition: eq(variables.IncludeData, true)
+
+
+#########################################################################
+#  Publish Artifcats
+#########################################################################
+
+# Publish the artifacts to the build.
+- task: PublishBuildArtifacts@1
+  displayName: 'Publish Artifact: $(SolutionName)'
+  inputs:
+    pathToPublish: $(Build.ArtifactStagingDirectory)
+    artifact: '$(SolutionName)'
+

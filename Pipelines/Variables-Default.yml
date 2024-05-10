@@ -1,0 +1,29 @@
+variables:
+  # Tells the template to run the solution checker
+  RunSolutionChecker: true
+
+  # Tells the templates to include and process data
+  IncludeData: false
+
+  # Tells the templates to build the plugins
+  BuildPlugins: false
+
+  # Tells the tempalates to use the mapping.xml file to map plugin and/or webresources
+  UseSolutionMapping: false
+
+  # Tells the tempalates where the Mapping File is
+  SolutionMappingFile: ''
+
+
+  # Format the Build Version to be the     
+  #  Year/Month
+  BuildVersion: $[ format('{0:yyMM}', pipeline.startTime) ]
+  # Format the Build Version to be the     
+  #  Day/Hour (UTC TIME)
+  RevisionVersion:  $[ format('{0:ddHH}', pipeline.startTime) ]
+
+  # Tells the templates what the target environment URL is
+  TargetEnvironment: $(BuildTools.EnvironmentUrl)
+
+  # Tells the tempatles what the variables file is for deployment packaging
+  ProjectVariableFile: Variables-Default.yml

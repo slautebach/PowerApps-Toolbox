@@ -1,0 +1,168 @@
+# Yaml Toolset Documentation
+# https://learn.microsoft.com/en-us/power-platform/alm/devops-build-tool-tasks
+
+
+steps:
+
+##########################################################################
+# Log the Environment Variables, useful for debugging pipelines
+##########################################################################
+- pwsh: 'Get-ChildItem env:'
+  displayName: 'Log Environment Variables'
+
+#########################################################################
+#  Setup the pipeline and branch for extrct
+#########################################################################
+- powershell: '$(Build.SourcesDirectory)\Pipelines\git-set-branch-pr.ps1 -SystemAccessToken "$(System.AccessToken)" -SolutionName $(SolutionName)'
+  displayName: 'Set Branch'
+
+# Install the Power Platform Tools
+- task: microsoft-IsvExpTools.PowerPlatform-BuildTools.tool-installer.PowerPlatformToolInstaller@2
+  displayName: 'Power Platform Tool Installer'
+
+# Set PACEXEPATH variable : the path to the PAC CLI executable 
+- pwsh: |
+    $pacExePath = $env:POWERPLATFORMTOOLS_PACCLIPATH + "\pac\tools\pac.exe"  
+    echo "##vso[task.setvariable variable=PACEXEPATH]$pacExePath"
+  displayName: 'Set Pac.Exe path' 
+
+
+# Delete the solution folders
+- task: DeleteFiles@1
+  displayName: 'Clean Solution Folders'
+  inputs:
+    contents: |
+      $(Build.SourcesDirectory)\$(SolutionName)\Solution-Unmanaged/**/*
+      $(Build.SourcesDirectory)\$(SolutionName)\Solution-Managed/**/*
+      $(Build.SourcesDirectory)\$(SolutionName)\Data/Configuration/**/*
+
+
+
+#########################################################################
+#  Steps to extract the solution.
+#########################################################################
+
+# Set the Solution Version
+- task: microsoft-IsvExpTools.PowerPlatform-BuildTools.set-solution-version.PowerPlatformSetSolutionVersion@2
+  displayName: 'Set "$(SolutionName)" Solution Version to: "$(MajorVersion).$(MinorVersion).$(BuildVersion).$(RevisionVersion)"'
+  inputs:
+    authenticationType: PowerPlatformSPN
+    PowerPlatformSPN: '$(PowerPlatformSPN)'
+    Environment: '$(TargetEnvironment)'
+    SolutionName: '$(SolutionName)'
+    # Set the verions to Major.Minor.Build.Revision
+    SolutionVersionNumber: '$(MajorVersion).$(MinorVersion).$(BuildVersion).$(RevisionVersion)'
+
+# Connect to Dataverse and Publish all customizations before extracting
+- task: microsoft-IsvExpTools.PowerPlatform-BuildTools.publish-customizations.PowerPlatformPublishCustomizations@2
+  displayName: 'Power Platform Publish Customizations'
+  # if publish fails, continue with an extract.
+  continueOnError: true 
+  inputs:
+    authenticationType: PowerPlatformSPN
+    PowerPlatformSPN: '$(PowerPlatformSPN)'
+    Environment: '$(TargetEnvironment)'
+
+# Export the solution as UnManaged
+- task: microsoft-IsvExpTools.PowerPlatform-BuildTools.export-solution.PowerPlatformExportSolution@2
+  displayName: 'Export Unmanaged $(SolutionName)'
+  inputs:
+    authenticationType: PowerPlatformSPN
+    PowerPlatformSPN: '$(PowerPlatformSPN)'
+    Environment: '$(TargetEnvironment)'
+    SolutionName: '$(SolutionName)'
+    Managed: false
+    SolutionOutputFile: '$(Build.ArtifactStagingDirectory)\$(SolutionName).zip'
+
+
+# Export the solution as Managed
+- task: microsoft-IsvExpTools.PowerPlatform-BuildTools.export-solution.PowerPlatformExportSolution@2
+  displayName: 'Export Managed $(SolutionName)'
+  inputs:
+    authenticationType: PowerPlatformSPN
+    PowerPlatformSPN: '$(PowerPlatformSPN)'
+    Environment: '$(TargetEnvironment)'
+    SolutionName: '$(SolutionName)'
+    Managed: true
+    SolutionOutputFile: '$(Build.ArtifactStagingDirectory)\$(SolutionName)_managed.zip'
+
+
+# Unpack the unmanged solution
+- task: microsoft-IsvExpTools.PowerPlatform-BuildTools.unpack-solution.PowerPlatformUnpackSolution@2
+  displayName: 'Unpack Unmanaged $(SolutionName)'
+  inputs:
+    SolutionInputFile: '$(Build.ArtifactStagingDirectory)\$(SolutionName).zip'
+    SolutionTargetFolder: '$(Build.SourcesDirectory)\$(SolutionName)\Solution-Unmanaged'
+    SolutionType: 'Unmanaged'
+    MapFile: '$(SolutionMappingFile)'
+
+
+# Unpack the manged solution
+- task: microsoft-IsvExpTools.PowerPlatform-BuildTools.unpack-solution.PowerPlatformUnpackSolution@2
+  displayName: 'Unpack Managed $(SolutionName)'
+  inputs:
+    SolutionInputFile: '$(Build.ArtifactStagingDirectory)\$(SolutionName)_managed.zip'
+    SolutionTargetFolder: '$(Build.SourcesDirectory)\$(SolutionName)\Solution-Managed'
+    SolutionType: 'Managed'
+    MapFile: '$(SolutionMappingFile)'
+
+
+# Extract/Update the solution settings file.
+- pwsh: $(PACEXEPATH) solution create-settings --settings-file "$(Build.SourcesDirectory)\$(SolutionName)\Solution-Settings.json" --solution-zip "$(Build.ArtifactStagingDirectory)\$(SolutionName)_managed.zip"
+  displayName: 'Extract Solution Settings File for $(SolutionName)'
+
+# Run the checker on the managed solution zip
+- task: microsoft-IsvExpTools.PowerPlatform-BuildTools.checker.PowerPlatformChecker@2
+  displayName: 'Run Solution Checker on Managed $(SolutionName)'
+  inputs:
+    PowerPlatformSPN: '$(PowerPlatformSPN)'
+    Environment: '$(TargetEnvironment)'
+    FilesToAnalyze: '$(Build.ArtifactStagingDirectory)\$(SolutionName)_managed.zip'
+    RuleSet: '0ad12346-e108-40b8-a956-9a8f95ea18c9'
+    # fail on any critical errors
+    ErrorThreshold: 0
+    ErrorLevel: Critical
+    FailOnPowerAppsCheckerAnalysisError: true
+    SaveResults: true
+  continueOnError: true
+  condition: eq(variables.RunSolutionChecker, true)
+
+#########################################################################
+#  Steps to extract configuration data.
+#########################################################################
+  
+# Extract the data
+- task: microsoft-IsvExpTools.PowerPlatform-BuildTools.export-data.PowerPlatformExportData@2
+  displayName: 'Power Platform Export Data for $(SolutionName)'
+  # Extract the data if it is enabled
+  condition: eq(variables.IncludeData, true)
+  inputs:
+    authenticationType: PowerPlatformSPN
+    PowerPlatformSPN: '$(PowerPlatformSPN)'
+    Environment: '$(TargetEnvironment)'
+    SchemaFile: '$(Build.SourcesDirectory)\$(SolutionName)\Data\Configuration.xml'
+    DataFile: '$(Build.ArtifactStagingDirectory)\$(SolutionName).data.zip'
+    Overwrite: true
+
+# Extract the data to commit to source
+- pwsh: Expand-Archive -Path '$(Build.ArtifactStagingDirectory)\$(SolutionName).data.zip' -DestinationPath '$(Build.SourcesDirectory)\$(SolutionName)\Data\Configuration\' -Force
+  displayName: 'Extract Data for $(SolutionName)'
+  # Extract the data if it is enabled
+  condition: eq(variables.IncludeData, true)
+
+# Extract the data file columns
+# commneted out as we currently don't have a way to pass in the app id/client secret to the script 
+# from a build pipeline to all pipelines.  For the time being Devs' need to run the script manually.
+# And commit the changes into source control.
+#- pwsh: 'Extract-FileAttachment-Columns.ps1 -SolutionName $(SolutionName) -targetEnvironment $(TargetEnvironment)'
+#  displayName: 'Extract File Attachment Columns for $(SolutionName)'
+#  # Extract the data if it is enabled
+#  condition: eq(variables.IncludeData, true)
+
+#########################################################################
+#  Commit the changes to source
+#########################################################################
+- powershell: '$(Build.SourcesDirectory)\Pipelines\git-commit-pr.ps1 -SystemAccessToken "$(System.AccessToken)" -SolutionName $(SolutionName)'
+  displayName: 'Commit changes to source'
+
+
